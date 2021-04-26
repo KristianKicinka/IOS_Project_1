@@ -13,7 +13,7 @@ LOG_FILES=""
 GZIP_LOG_FILES=""
 TICKER_FILTER="cat"
 READ_INPUT="cat"
-READ_FILTER="cat"
+READ_FILTER="cat";
 
 set_program_parameters() {
 
