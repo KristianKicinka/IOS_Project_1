@@ -1,0 +1,342 @@
+#!/bin/sh
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+
+
+# Configure variables
+COMMAND_FLAG=""
+WIDTH_FLAG=""
+BEFORE_FLAG=""
+AFTER_FLAG=""
+TICKERS=""
+LOG_FILES=""
+GZIP_LOG_FILES=""
+TICKER_FILTER="cat"
+READ_INPUT="cat"
+READ_FILTER="cat"
+
+set_program_parameters() {
+
+   while [ $# -gt 0 ] ; do
+      
+        case "$1" in
+        --help | -h)
+            help_function
+            exit 0 ;;
+        profit | list-tick | pos | last-price | hist-ord | graph-pos )
+            COMMAND_FLAG="$1"
+            shift ;;
+        -t )
+            if [ "$TICKERS" = "" ] ;then
+                TICKERS="$2"
+            else
+                TICKERS="$2\|$TICKERS"
+            fi
+            shift
+            shift;;
+        -a )
+           AFTER_FLAG="$2"
+            shift
+            shift ;;
+        -b )
+            BEFORE_FLAG="$2"
+            shift
+            shift ;;
+        -w )
+            if [ "$WIDTH_FLAG" = "" ] ;then
+                WIDTH_FLAG="$2"
+            else
+                echo "Duplicitne zadaná šírka grafu."
+                exit 1
+            fi
+            WIDTH_FLAG="$2"
+            shift
+            shift ;;
+        *.gz)
+            GZIP_LOG_FILES="$1 $GZIP_LOG_FILES"
+            shift
+        ;;
+        *)
+            LOG_FILES="$1 $LOG_FILES"
+            shift
+        ;;
+        esac
+
+   done
+
+    if [ "$WIDTH_FLAG" = "" ] ;then
+        WIDTH_FLAG="1"
+    fi
+}
+
+prepare_files(){
+
+    if [ "$GZIP_LOG_FILES" != "" ] && [ "$LOG_FILES" != "" ] ;then
+        READ_INPUT="gzip -d -c $GZIP_LOG_FILES | cat $LOG_FILES"
+    elif [ "$LOG_FILES" != "" ] ; then
+        READ_INPUT="cat $LOG_FILES"
+    elif [ "$GZIP_LOG_FILES" != "" ] ; then
+        READ_INPUT="gzip -d -c $GZIP_LOG_FILES"
+    fi
+
+    READ_FILTER="$READ_INPUT"
+}
+prepare_ticker_filters(){
+    if [ "$TICKERS" != "" ] ;then
+        TICKER_FILTER="grep '^.*;\($TICKERS\);'"
+        READ_FILTER="$READ_FILTER | $TICKER_FILTER"
+    fi
+}
+
+prepare_time_filters(){
+    if [ "$AFTER_FLAG" != "" ] && [ "$BEFORE_FLAG" != "" ] ;then
+        READ_FILTER="$READ_FILTER | awk -F ';' '{if( \$1 > \"$AFTER_FLAG\" && \$1 < \"$BEFORE_FLAG\" ) { print \$0 }}'"
+    elif [ "$AFTER_FLAG" != "" ] ;then
+        READ_FILTER="$READ_FILTER | awk -F ';' '{if( \$1 > \"$AFTER_FLAG\" ) { print \$0 }}'"
+    elif [ "$BEFORE_FLAG" != "" ] ;then
+        READ_FILTER="$READ_FILTER | awk -F ';' '{if( \$1 < \"$BEFORE_FLAG\" ) { print \$0 }}'"
+    fi
+}
+
+prepare_filters(){
+    prepare_time_filters
+    prepare_ticker_filters
+}
+
+
+process_commands(){
+    if [ "$COMMAND_FLAG" = "profit" ] ;then
+        profit_command
+    fi
+    if [ "$COMMAND_FLAG" = "list-tick" ] ;then
+        list_tick_command
+    fi
+    if [ "$COMMAND_FLAG" = "pos" ] ;then
+        pos_command
+    fi
+    if [ "$COMMAND_FLAG" = "last-price" ] ;then
+        last_price_command
+    fi
+    if [ "$COMMAND_FLAG" = "hist-ord" ] ;then
+        hist_ord_command
+    fi
+    if [ "$COMMAND_FLAG" = "graph-pos" ] ;then
+        graph_pos_command
+    fi
+    if [ "$COMMAND_FLAG" = "" ] ;then
+        default_command
+    fi
+}
+
+# Command functions
+list_tick_command(){
+    eval "$READ_FILTER | awk -F ';' '!_[\$2]++ {print \$2}' | sort"
+}
+
+profit_command(){
+    eval "$READ_FILTER | awk -F ';' 'BEGIN{ 
+        sell = 0 
+        buy = 0 
+        sum = 0 }
+        {
+        if(\$3 == \"sell\"){
+            sell += \$4 * \$6 
+        }
+        else{
+            buy +=  \$4 * \$6 
+        }
+    } END { sum = sell - buy 
+            printf \"%.2f\n\",sum 
+    }'"
+}
+
+default_command(){
+    eval "$READ_FILTER"
+}
+
+pos_command(){
+    eval "$READ_FILTER | awk -F ';' '{
+         ticker_array[\$2] = \$2
+
+         if(\$3 == \"buy\" && \$2 == ticker_array[\$2] ){
+
+            ticker_values[\$2] += \$6
+            last_transaction[\$2] = \$4
+
+         }else if(\$3 == \"sell\" && \$2 == ticker_array[\$2] ){
+
+            ticker_values[\$2] -= \$6
+            last_transaction[\$2] = \$4
+         }
+    }
+    END{
+        for(i in ticker_array){
+            ticker_values[i] = sprintf(\"%.2f\",ticker_values[i]*last_transaction[i]) 
+
+            if(output_length < length( ticker_values[i] )){
+                output_length = length(ticker_values[i]);
+            } 
+        } 
+        for(i in ticker_array) printf \"%-10s: %*.2f\n\", ticker_array[i], output_length, ticker_values[i];
+    }'| sort -t ':' -k 2,2 -n -r"
+}
+
+last_price_command(){
+
+    eval "$READ_FILTER | awk -F ';' 'BEGIN{ output_length = 0 }{
+         ticker_array[\$2] = \$2
+
+         if(\$2 == ticker_array[\$2] ){
+
+            last_price[\$2] = sprintf(\"%.2f\",\$4) 
+
+            if(output_length < length( last_price[\$2] )){
+                output_length = length( last_price[\$2] );
+            } 
+        }
+    
+    }
+    END{
+        for(i in ticker_array) printf \"%-10s: %*.2f\n\", ticker_array[i], output_length, last_price[i];
+    }'| sort"
+
+}
+
+hist_ord_command(){
+    eval "$READ_FILTER | awk -F ';' 'BEGIN{ graph_width=\"$WIDTH_FLAG\" }
+    {
+         ticker_array[\$2] = \$2
+
+         if(\$2 == ticker_array[\$2] ){
+            transactions_count[\$2] +=1 
+        }
+    
+    }
+    END{
+        constant_width = 1
+        max_width_value = 0
+
+        for(i in transactions_count){
+            if(transactions_count[i] > max_width_value){
+                max_width_value = transactions_count[i]
+            }
+        }
+
+        if(graph_width != 1){
+            constant_width = max_width_value / graph_width
+        }
+        
+        for(i in ticker_array){
+            printf \"%-10s:\", ticker_array[i]
+
+            if( int( transactions_count[i] / constant_width ) != 0){
+                printf \" \"
+            }
+
+            j=1
+            while (j++ <= int(transactions_count[i] / constant_width) ) printf \"#\"
+            printf \"\n\"
+        };
+    }'| sort"
+}
+
+graph_pos_command(){
+    eval "$READ_FILTER | awk -F ';' 'BEGIN{ graph_width=\"$WIDTH_FLAG\" }
+    {
+        ticker_array[\$2] = \$2
+        sign_of_values[\$2] = 1
+
+        if(\$3 == \"buy\" && \$2 == ticker_array[\$2] ){
+
+            ticker_values[\$2] += \$6
+            last_transaction[\$2] = \$4
+
+        }else if(\$3 == \"sell\" && \$2 == ticker_array[\$2] ){
+
+            ticker_values[\$2] -= \$6
+            last_transaction[\$2] = \$4
+        }
+    }
+
+    END{
+        for(i in ticker_array) {
+            ticker_values[i] = ticker_values[i]*last_transaction[i]
+            
+            if( ticker_values[i] < 0 ){
+                sign_of_values[i] = 0
+                ticker_values[i] = ticker_values[i] * -1
+            }else{
+                sign_of_values[i] = 1
+            }
+            
+        }
+
+        constant_width = 1
+        max_width_value = 0
+
+        for(i in ticker_values){
+            if(ticker_values[i] > max_width_value){
+                max_width_value = ticker_values[i]  
+            }
+        }
+
+        if(graph_width != 1){
+            constant_width = max_width_value / graph_width
+        }
+        
+        for(i in ticker_array){
+            printf \"%-10s:\", ticker_array[i]
+            j=1
+
+            if( int(ticker_values[i] / constant_width) != 0){
+                printf \" \"
+            }
+
+            while (j++ <= int(ticker_values[i] / constant_width) ){
+                if(sign_of_values[i] == 0){
+                    printf \"!\"
+                }else{
+                    printf \"#\"
+                }
+            }
+            printf \"\n\"
+        };
+
+    }' | sort"
+}
+# Printing help instructions
+help_function(){
+    echo "POUŽITIE: tradelog [-h | --help]"
+    echo "       tradelog [FILTER] [PRÍKAZ] [LOG [LOG 2 [...]]]"
+    echo "  PRÍKAZ:"
+    echo "      list-tick   - výpis seznamu vyskytujících se burzovních symbolů, tzv. \“tickerů\”"
+    echo "      profit      – výpis celkového zisku z uzavřených pozic."
+    echo "      pos         – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty."
+    echo "      last-price  – výpis poslední známé ceny pro každý ticker."
+    echo "      hist-ord    – výpis histogramu počtu transakcí dle tickeru."
+    echo "      graph-pos   – výpis grafu hodnot držených pozic dle tickeru."
+    echo ""
+    echo "  FILTER:"
+    printf "      -a [DATETIME]\t – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data).\n \t\t\t\t DATETIME je formátu YYYY-MM-DD HH:MM:SS.\n"
+    printf "      -b [DATETIME]\t – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data).\n"
+    printf "      -t [TICKER]\t – jsou uvažovány pouze záznamy odpovídající danému tickeru.\n \t\t\t\t Při více výskytech přepínače se bere množina všech uvedených tickerů.\n "
+    printf "     -w [WIDTH]\t – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH.\n \t\t\t\t Tedy, WIDTH musí být kladné celé číslo.\n \t\t\t\t Více výskytů přepínače je chybné spuštění. \n"
+    printf "      -h | --help\t – vypíšou nápovědu s krátkým popisem každého příkazu a přepínače.\n"
+
+}
+
+# Main Function
+main() {
+    set_program_parameters "$@"
+    #echo "$GZIP_LOG_FILES"
+    #echo "$COMMAND_FLAG"
+    prepare_files
+    prepare_filters
+    #echo "$READ_INPUT"
+    #echo "$READ_FILTER"
+    process_commands
+
+}
+
+
+main "$@"
